@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>야구 라인업 빌더</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+    }
+
+    body {
+      margin: 2rem;
+      line-height: 1.5;
+    }
+
+    h1 {
+      margin-bottom: 1rem;
+    }
+
+    .uploader {
+      margin-bottom: 2rem;
+      padding: 1rem;
+      border: 1px solid #ccc;
+      border-radius: 0.5rem;
+      max-width: 32rem;
+    }
+
+    .lineup-section {
+      margin-bottom: 2.5rem;
+    }
+
+    .nav-controls {
+      margin-bottom: 2rem;
+    }
+
+    button {
+      padding: 0.6rem 1.2rem;
+      font-size: 1rem;
+      border-radius: 0.5rem;
+      border: 1px solid #5554;
+      cursor: pointer;
+      background-color: #f2f2f2;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 1rem;
+    }
+
+    th, td {
+      border: 1px solid #ccc;
+      padding: 0.5rem;
+      text-align: left;
+    }
+
+    th {
+      background-color: rgba(0, 0, 0, 0.05);
+    }
+
+    select {
+      width: 100%;
+      padding: 0.4rem;
+    }
+
+    .multi-select {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .multi-select select {
+      flex: 1 1 6rem;
+      min-width: 5rem;
+      width: auto;
+    }
+
+    .notice {
+      color: #b00;
+      font-weight: 600;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .section-note {
+      font-weight: 600;
+      margin: 0.5rem 0 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>어웨이 &amp; 홈 라인업 자동 구성</h1>
+  <section class="uploader">
+    <p>
+      CSV 혹은 TXT 파일을 업로드하면 투구 로그를 분석해 선공(어웨이)과 후공(홈) 팀의
+      타순을 구성합니다. 각 선수 오른쪽에는 선발 포지션과 이닝/아웃 기준 포지션 변경을
+      기록할 수 있는 드롭다운이 제공됩니다.
+    </p>
+    <label>
+      CSV/TXT 파일 선택
+      <input id="csvInput" type="file" accept=".csv,.txt" />
+    </label>
+    <p id="status" class="notice hidden"></p>
+  </section>
+
+  <section id="scoreboard" class="lineup-section hidden"></section>
+
+  <section id="away" class="lineup-section hidden"></section>
+  <section id="home" class="lineup-section hidden"></section>
+
+  <div id="nav" class="nav-controls hidden">
+    <button id="nextButton">다음</button>
+  </div>
+
+  <section id="appearance-page" class="lineup-section hidden">
+    <h2>타석 감지</h2>
+    <p class="section-note">타석 감지</p>
+    <div id="appearance-away"></div>
+    <div id="appearance-home"></div>
+  </section>
+
+  <template id="lineup-template">
+    <h2></h2>
+    <table>
+      <thead>
+        <tr>
+          <th>타순</th>
+          <th>선수</th>
+          <th>선발 포지션</th>
+          <th>제 2포지션</th>
+          <th>제 3포지션</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </template>
+
+  <script>
+    const BASE_POSITION_OPTIONS = [
+      { value: "0", label: "투수" },
+      { value: "1", label: "포수" },
+      { value: "2", label: "1루수" },
+      { value: "3", label: "2루수" },
+      { value: "4", label: "3루수" },
+      { value: "5", label: "유격수" },
+      { value: "6", label: "좌익수" },
+      { value: "7", label: "중견수" },
+      { value: "8", label: "우익수" },
+      { value: "10", label: "지명타자" }
+    ];
+
+    const POSITION_OPTIONS = [{ value: "", label: "포지션 선택" }].concat(
+      BASE_POSITION_OPTIONS
+    );
+
+    const STARTING_POSITION_OPTIONS = [
+      { value: "", label: "포지션 선택" },
+      { value: "SUB", label: "교체 선수" }
+    ].concat(BASE_POSITION_OPTIONS);
+
+    const INNING_OPTIONS = [{ value: "", label: "이닝" }].concat(
+      Array.from({ length: 9 }, (_, idx) => ({
+        value: String(idx + 1),
+        label: `${idx + 1}이닝`
+      }))
+    );
+
+    const OUT_OPTIONS = [
+      { value: "", label: "아웃" },
+      { value: "0", label: "0아웃" },
+      { value: "1", label: "1아웃" },
+      { value: "2", label: "2아웃" }
+    ];
+
+    const POSITION_LOOKUP = BASE_POSITION_OPTIONS.reduce((acc, { value, label }) => {
+      acc[value] = label;
+      return acc;
+    }, {});
+
+    const POSITION_PREFIX = {
+      0: "투",
+      1: "포",
+      2: "1",
+      3: "2",
+      4: "3",
+      5: "유",
+      6: "좌",
+      7: "중",
+      8: "우"
+    };
+
+    const RESULT_PRIORITY = {
+      HOMERUN: 90,
+      WALK: 80,
+      HBP: 80,
+      STRIKEOUT: 70,
+      HIT: 60,
+      FLY_OUT: 50,
+      GROUND_OUT: 50,
+      OUT: 40,
+      OTHER: 30,
+      FOUL: 10,
+      PENDING: 0
+    };
+
+    const REQUIRED_COLUMNS = [
+      "half",
+      "bIdx",
+      "bName",
+      "bPos",
+      "inn",
+      "result",
+      "call",
+      "strk",
+      "scoreA",
+      "scoreB"
+    ];
+
+    const SUPPORTED_EXTENSIONS = [".csv", ".txt"];
+
+    const MAX_INNING = 12;
+
+    let currentLineups = null;
+
+    const createEmptyScoreboard = () => ({
+      away: {
+        label: "어웨이",
+        innings: Array(MAX_INNING).fill(0),
+        hits: 0,
+        walksOrHbp: 0
+      },
+      home: {
+        label: "홈",
+        innings: Array(MAX_INNING).fill(0),
+        hits: 0,
+        walksOrHbp: 0
+      }
+    });
+
+    document.getElementById("csvInput").addEventListener("change", handleFileSelection);
+    document.getElementById("nextButton").addEventListener("click", showAppearancePage);
+
+    function handleFileSelection(event) {
+      const file = event.target.files?.[0];
+      resetDisplay();
+
+      if (!file) {
+        updateStatus("CSV 또는 TXT 파일을 선택해 주세요.");
+        return;
+      }
+
+      const loweredName = file.name.toLowerCase();
+      const extension = SUPPORTED_EXTENSIONS.find((ext) => loweredName.endsWith(ext));
+      if (!extension) {
+        updateStatus("CSV 또는 TXT 확장자의 파일만 지원합니다.");
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const text = reader.result;
+          const rawText = typeof text === "string" ? text : new TextDecoder().decode(text);
+          const rows = parseWithFallback(rawText);
+
+          if (!rows.length) {
+            updateStatus("파일 내용이 비어 있습니다.");
+            return;
+          }
+
+          const { header, index } = extractHeader(rows[0]);
+          const missing = REQUIRED_COLUMNS.filter((col) => !(col in index));
+          if (missing.length) {
+            updateStatus(`다음 컬럼을 찾을 수 없습니다: ${missing.join(", ")}`);
+            return;
+          }
+
+          const lineupData = buildLineups(rows.slice(1), index);
+          currentLineups = lineupData;
+
+          renderScoreboard(lineupData.scoreboard);
+          renderLineupSection("away", "어웨이 (선공)", lineupData.away);
+          renderLineupSection("home", "홈 (후공)", lineupData.home);
+          document.getElementById("scoreboard").classList.remove("hidden");
+          document.getElementById("nav").classList.remove("hidden");
+          updateStatus("");
+        } catch (error) {
+          console.error(error);
+          updateStatus("파일 분석 중 오류가 발생했습니다. 콘솔을 확인해 주세요.");
+        }
+      };
+
+      reader.onerror = () => updateStatus("파일을 읽는 중 문제가 발생했습니다.");
+      reader.readAsText(file, "utf-8");
+    }
+
+    function resetDisplay() {
+      updateStatus("");
+      document.getElementById("scoreboard").classList.add("hidden");
+      document.getElementById("scoreboard").innerHTML = "";
+      document.getElementById("away").classList.add("hidden");
+      document.getElementById("home").classList.add("hidden");
+      document.getElementById("away").innerHTML = "";
+      document.getElementById("home").innerHTML = "";
+      document.getElementById("appearance-away").innerHTML = "";
+      document.getElementById("appearance-home").innerHTML = "";
+      document.getElementById("appearance-page").classList.add("hidden");
+      document.getElementById("nav").classList.add("hidden");
+      currentLineups = null;
+    }
+
+    function updateStatus(message) {
+      const status = document.getElementById("status");
+      if (message) {
+        status.textContent = message;
+        status.classList.remove("hidden");
+      } else {
+        status.textContent = "";
+        status.classList.add("hidden");
+      }
+    }
+
+    function parseWithFallback(text) {
+      const delimiter = detectDelimiter(text);
+      let rows = parseDelimited(text, delimiter);
+
+      if (rows.length <= 1 && delimiter !== ",") {
+        rows = parseDelimited(text, ",");
+      }
+
+      if (rows.length <= 1 && delimiter !== "\t") {
+        rows = parseDelimited(text, "\t");
+      }
+
+      return rows;
+    }
+
+    function detectDelimiter(text) {
+      const sampleLine = text
+        .split(/\r?\n/)
+        .find((line) => line.trim().length);
+
+      if (!sampleLine) return ",";
+
+      const commaCount = (sampleLine.match(/,/g) ?? []).length;
+      const tabCount = (sampleLine.match(/\t/g) ?? []).length;
+
+      if (tabCount > commaCount) {
+        return "\t";
+      }
+
+      return ",";
+    }
+
+    function parseDelimited(text, delimiter = ",") {
+      const rows = [];
+      let row = [];
+      let current = "";
+      let inQuotes = false;
+
+      for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (inQuotes) {
+          if (char === "\"") {
+            if (text[i + 1] === "\"") {
+              current += "\"";
+              i += 1;
+            } else {
+              inQuotes = false;
+            }
+          } else {
+            current += char;
+          }
+        } else if (char === "\"") {
+          inQuotes = true;
+        } else if (char === delimiter) {
+          row.push(current);
+          current = "";
+        } else if (char === "\n" || char === "\r") {
+          if (char === "\r" && text[i + 1] === "\n") {
+            i += 1;
+          }
+          row.push(current);
+          rows.push(row);
+          row = [];
+          current = "";
+        } else {
+          current += char;
+        }
+      }
+
+      if (current || row.length) {
+        row.push(current);
+        rows.push(row);
+      }
+
+      return rows.filter((r) => r.some((value) => value.trim() !== ""));
+    }
+
+    function extractHeader(rawHeader) {
+      const header = rawHeader.map((value) => value.trim());
+      const index = header.reduce((acc, columnName, idx) => {
+        acc[columnName] = idx;
+        return acc;
+      }, {});
+      return { header, index };
+    }
+
+    function buildLineups(rows, index) {
+      const lineups = {
+        away: new Map(),
+        home: new Map()
+      };
+
+      const teamState = {
+        away: null,
+        home: null
+      };
+
+      const scoreboard = createEmptyScoreboard();
+      const eventLog = new Map();
+      let eventCounter = 0;
+
+      const scoreIndexes = {
+        away: index.scoreA,
+        home: index.scoreB
+      };
+      const previousScores = {
+        away: null,
+        home: null
+      };
+
+      for (const row of rows) {
+        const halfRaw = row[index.half];
+        const batterName = row[index.bName]?.trim();
+        const batterIdxRaw = row[index.bIdx]?.trim();
+        const inningRaw = row[index.inn]?.trim();
+
+        const teamKey = halfRaw === "1" ? "away" : halfRaw === "0" ? "home" : null;
+
+        updateScoreProgress(row, index, scoreboard, scoreIndexes, previousScores, teamKey);
+
+        if (!halfRaw || !teamKey || !batterName || batterName === "" || !batterIdxRaw || batterIdxRaw === "255") {
+          continue;
+        }
+
+
+        const batterIdx = Number.parseInt(batterIdxRaw, 10);
+        if (Number.isNaN(batterIdx)) continue;
+
+        if (!lineups[teamKey].has(batterIdx)) {
+          const posRaw = row[index.bPos]?.trim();
+          const normalizedPos = POSITION_LOOKUP[posRaw] ? posRaw : "";
+          lineups[teamKey].set(batterIdx, {
+            name: batterName,
+            defaultPosition: normalizedPos,
+            appearances: new Map()
+          });
+        }
+
+        const info = lineups[teamKey].get(batterIdx);
+        const inningNumber = Number.parseInt(inningRaw, 10);
+
+        if (!Number.isNaN(inningNumber) && !info.appearances.has(inningNumber)) {
+          info.appearances.set(inningNumber, { text: "", type: "PENDING" });
+        }
+
+        const state = teamState[teamKey];
+        if (!state || state.batterIdx !== batterIdx) {
+          teamState[teamKey] = {
+            batterIdx,
+            inning: Number.isNaN(inningNumber) ? null : inningNumber
+          };
+        } else if (state.inning === null && !Number.isNaN(inningNumber)) {
+          state.inning = inningNumber;
+        }
+
+        const description = describePlateAppearance(row, index);
+        if (!description) {
+          continue;
+        }
+
+        const targetInningState = teamState[teamKey];
+        const targetInning =
+          targetInningState && targetInningState.inning !== undefined
+            ? targetInningState.inning
+            : null;
+
+        const hasStateInning =
+          targetInning !== null && targetInning !== undefined && !Number.isNaN(targetInning);
+
+        const inningKey = hasStateInning
+          ? targetInning
+          : !Number.isNaN(inningNumber)
+          ? inningNumber
+          : null;
+
+        if (inningKey !== null) {
+          const existing = info.appearances.get(inningKey);
+          const candidate = createAppearanceEntry(description);
+
+          const shouldApply = !existing || !existing.text || shouldReplaceResult(existing, candidate);
+          if (shouldApply) {
+            applyAppearanceToScoreboard(
+              scoreboard,
+              teamKey,
+              inningKey,
+              existing,
+              candidate,
+              eventLog,
+              () => {
+                eventCounter += 1;
+                return eventCounter;
+              }
+            );
+            info.appearances.set(inningKey, candidate);
+          }
+        }
+
+        teamState[teamKey] = null;
+      }
+
+      return { ...lineups, scoreboard };
+    }
+
+    function createAppearanceEntry(text) {
+      return { text, type: classifyAppearanceResult(text), eventId: null };
+    }
+
+    function classifyAppearanceResult(text) {
+      if (!text) return "OTHER";
+      if (text === "홈런") return "HOMERUN";
+      if (text === "볼넷") return "WALK";
+      if (text === "사구") return "HBP";
+      if (text === "삼진") return "STRIKEOUT";
+      if (text.endsWith("안") || text.includes("안타")) return "HIT";
+      if (text.endsWith("비") || text.includes("플라이아웃")) return "FLY_OUT";
+      if (text.endsWith("땅") || text.includes("땅볼")) return "GROUND_OUT";
+      return "OTHER";
+    }
+
+    function computeBatterStats(info) {
+      let plateAppearances = 0;
+      let atBats = 0;
+      let hits = 0;
+
+      if (info?.appearances) {
+        info.appearances.forEach((entry) => {
+          if (!entry) return;
+          plateAppearances += 1;
+
+          switch (entry.type) {
+            case "HOMERUN":
+            case "HIT":
+            case "STRIKEOUT":
+            case "FLY_OUT":
+            case "GROUND_OUT":
+            case "OUT":
+              atBats += 1;
+              break;
+            default:
+              break;
+          }
+
+          if (entry.type === "HOMERUN" || entry.type === "HIT") {
+            hits += 1;
+          }
+        });
+      }
+
+      const battingAverage = atBats > 0 ? (hits / atBats).toFixed(3) : "0.000";
+
+      return {
+        plateAppearances,
+        atBats,
+        hits,
+        battingAverage
+      };
+    }
+
+    function shouldReplaceResult(existing, candidate) {
+      const existingPriority = RESULT_PRIORITY[existing?.type] ?? 0;
+      const candidatePriority = RESULT_PRIORITY[candidate?.type] ?? 0;
+
+      if (candidatePriority > existingPriority) {
+        return true;
+      }
+
+      if (candidatePriority < existingPriority) {
+        return false;
+      }
+
+      return true;
+    }
+
+    function describePlateAppearance(row, index) {
+      const resultValue = parseInteger(row[index.result]);
+      const callValue = parseInteger(row[index.call]);
+      const strikeCount = parseInteger(row[index.strk]);
+      const safeToFirst = index["1BSafe"] !== undefined
+        ? parseInteger(row[index["1BSafe"]])
+        : null;
+      const position = resolveFieldingPosition(row, index);
+
+      if (resultValue === 4) {
+        return "홈런";
+      }
+
+      if (resultValue === 5) {
+        return "볼넷";
+      }
+
+      if (callValue === 3) {
+        return "사구";
+      }
+
+      if (isStrikeOut(callValue, strikeCount, resultValue)) {
+        return "삼진";
+      }
+
+      if (safeToFirst === 0) {
+        if (resultValue === 1) {
+          return position ? `${position}비` : "플라이아웃";
+        }
+
+        if (resultValue === 2) {
+          return position ? `${position}땅` : "땅볼";
+        }
+
+        return position ? `${position}아웃` : "아웃";
+      }
+
+      const isHit = safeToFirst === 1 || (safeToFirst === null && resultValue === 0 && callValue === 2);
+      if (isHit) {
+        return position ? `${position}안` : "안타";
+      }
+
+      if (resultValue === 1) {
+        return position ? `${position}비` : "플라이아웃";
+      }
+
+      if (resultValue === 2) {
+        return position ? `${position}땅` : "땅볼";
+      }
+
+      return null;
+    }
+
+    function isStrikeOut(callValue, strikeCount, resultValue) {
+      if (resultValue && resultValue !== 0) {
+        return false;
+      }
+
+      if (strikeCount === null) {
+        return false;
+      }
+
+      const isStrikeCall = callValue === 0 || callValue === 4;
+      return isStrikeCall && strikeCount >= 2;
+    }
+
+    function resolveFieldingPosition(row, index) {
+      const cPosIndex = index.cPos;
+      const hPosIndex = index.hPos;
+      const assIndex = index.ass;
+
+      const candidates = [];
+      if (cPosIndex !== undefined) {
+        candidates.push(parseInteger(row[cPosIndex]));
+      }
+
+      if (hPosIndex !== undefined) {
+        candidates.push(parseInteger(row[hPosIndex]));
+      }
+
+      if (assIndex !== undefined) {
+        const assValue = parseInteger(row[assIndex]);
+        if (assValue !== null) {
+          const lowestBit = extractLowestBitIndex(assValue);
+          if (lowestBit !== null) {
+            candidates.push(lowestBit);
+          }
+        }
+      }
+
+      const resolved = candidates.find((value) =>
+        value !== null && POSITION_PREFIX[value]
+      );
+
+      return resolved ? POSITION_PREFIX[resolved] : null;
+    }
+
+    function extractLowestBitIndex(value) {
+      if (value <= 0) return null;
+      let index = 0;
+      let temp = value;
+      while ((temp & 1) === 0 && index < 16) {
+        temp >>= 1;
+        index += 1;
+      }
+      return index;
+    }
+
+    function parseInteger(value) {
+      if (value === undefined || value === null) {
+        return null;
+      }
+
+      const trimmed = String(value).trim();
+      if (trimmed === "") {
+        return null;
+      }
+
+      const parsed = Number.parseInt(trimmed, 10);
+      return Number.isNaN(parsed) ? null : parsed;
+    }
+
+    function applyAppearanceToScoreboard(
+      scoreboard,
+      teamKey,
+      inningKey,
+      existing,
+      candidate,
+      eventLog,
+      nextEventId
+    ) {
+      if (!teamKey || !scoreboard?.[teamKey]) {
+        return;
+      }
+
+      if (existing?.eventId) {
+        const previous = eventLog.get(existing.eventId);
+        if (previous) {
+          if (previous.hitsDelta) {
+            scoreboard[previous.teamKey].hits -= previous.hitsDelta;
+          }
+          if (previous.walksDelta) {
+            scoreboard[previous.teamKey].walksOrHbp -= previous.walksDelta;
+          }
+          eventLog.delete(existing.eventId);
+        }
+      }
+
+      if (!candidate) return;
+
+      const eventId = nextEventId();
+      candidate.eventId = eventId;
+
+      let hitsDelta = 0;
+      let walksDelta = 0;
+
+      if (candidate.type === "HIT" || candidate.type === "HOMERUN") {
+        scoreboard[teamKey].hits += 1;
+        hitsDelta = 1;
+      } else if (candidate.type === "WALK" || candidate.type === "HBP") {
+        scoreboard[teamKey].walksOrHbp += 1;
+        walksDelta = 1;
+      }
+
+      eventLog.set(eventId, {
+        teamKey,
+        inning: inningKey,
+        hitsDelta,
+        walksDelta
+      });
+    }
+
+    function updateScoreProgress(row, index, scoreboard, scoreIndexes, previousScores, teamKey) {
+      const inningNumber = parseInteger(row[index.inn]);
+      const awayScoreIndex = scoreIndexes.away;
+      const homeScoreIndex = scoreIndexes.home;
+
+      const currentAwayScore =
+        awayScoreIndex !== undefined ? parseInteger(row[awayScoreIndex]) : null;
+      const currentHomeScore =
+        homeScoreIndex !== undefined ? parseInteger(row[homeScoreIndex]) : null;
+
+      const awayDelta =
+        currentAwayScore !== null && previousScores.away !== null
+          ? currentAwayScore - previousScores.away
+          : 0;
+      const homeDelta =
+        currentHomeScore !== null && previousScores.home !== null
+          ? currentHomeScore - previousScores.home
+          : 0;
+
+      if (inningNumber !== null && teamKey) {
+        const inningSlot = Math.min(Math.max(inningNumber, 1), MAX_INNING) - 1;
+        if (teamKey === "away") {
+          const appliedDelta = awayDelta > 0 ? awayDelta : homeDelta > 0 ? homeDelta : 0;
+          if (appliedDelta > 0) {
+            scoreboard.away.innings[inningSlot] += appliedDelta;
+          }
+        } else if (teamKey === "home") {
+          const appliedDelta = homeDelta > 0 ? homeDelta : awayDelta > 0 ? awayDelta : 0;
+          if (appliedDelta > 0) {
+            scoreboard.home.innings[inningSlot] += appliedDelta;
+          }
+        }
+      }
+
+      if (currentAwayScore !== null) {
+        previousScores.away = currentAwayScore;
+      }
+
+      if (currentHomeScore !== null) {
+        previousScores.home = currentHomeScore;
+      }
+    }
+
+    function renderScoreboard(scoreboard) {
+      const container = document.getElementById("scoreboard");
+      container.innerHTML = "";
+
+      if (!scoreboard) {
+        return;
+      }
+
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+
+      const teamHeader = document.createElement("th");
+      teamHeader.textContent = "팀명";
+      headRow.appendChild(teamHeader);
+
+      for (let inning = 1; inning <= MAX_INNING; inning += 1) {
+        const cell = document.createElement("th");
+        cell.textContent = `${inning}`;
+        headRow.appendChild(cell);
+      }
+
+      const runsHeader = document.createElement("th");
+      runsHeader.textContent = "R";
+      headRow.appendChild(runsHeader);
+
+      const hitsHeader = document.createElement("th");
+      hitsHeader.textContent = "H";
+      headRow.appendChild(hitsHeader);
+
+      const walksHeader = document.createElement("th");
+      walksHeader.textContent = "B";
+      headRow.appendChild(walksHeader);
+
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+
+      ["away", "home"].forEach((teamKey) => {
+        const team = scoreboard[teamKey];
+        if (!team) return;
+
+        const row = document.createElement("tr");
+
+        const nameCell = document.createElement("td");
+        nameCell.textContent = team.label;
+        row.appendChild(nameCell);
+
+        team.innings.forEach((runs) => {
+          const cell = document.createElement("td");
+          cell.textContent = runs ? String(runs) : "";
+          row.appendChild(cell);
+        });
+
+        const totalRuns = team.innings.reduce((sum, value) => sum + value, 0);
+        const runsCell = document.createElement("td");
+        runsCell.textContent = String(totalRuns);
+        row.appendChild(runsCell);
+
+        const hitsCell = document.createElement("td");
+        hitsCell.textContent = String(team.hits);
+        row.appendChild(hitsCell);
+
+        const walksCell = document.createElement("td");
+        walksCell.textContent = String(team.walksOrHbp);
+        row.appendChild(walksCell);
+
+        tbody.appendChild(row);
+      });
+
+      table.appendChild(tbody);
+      container.appendChild(table);
+    }
+
+    function renderLineupSection(sectionId, title, lineupMap) {
+      const container = document.getElementById(sectionId);
+      container.innerHTML = "";
+
+      const template = document.getElementById("lineup-template").content.cloneNode(true);
+      template.querySelector("h2").textContent = title;
+      const tbody = template.querySelector("tbody");
+
+      if (!lineupMap.size) {
+        const row = document.createElement("p");
+        row.textContent = "해당 팀의 타자 정보를 찾을 수 없습니다.";
+        container.appendChild(row);
+        container.classList.remove("hidden");
+        return;
+      }
+
+      const sorted = Array.from(lineupMap.entries()).sort((a, b) => a[0] - b[0]);
+      sorted.forEach(([batterIdx, info], order) => {
+        const tr = document.createElement("tr");
+
+        const orderCell = document.createElement("td");
+        orderCell.textContent = `${order + 1}`;
+        tr.appendChild(orderCell);
+
+        const nameCell = document.createElement("td");
+        nameCell.textContent = info.name;
+        tr.appendChild(nameCell);
+
+        const startingCell = document.createElement("td");
+        startingCell.appendChild(
+          createPositionSelect(
+            info.defaultPosition,
+            batterIdx,
+            "start",
+            STARTING_POSITION_OPTIONS
+          )
+        );
+        tr.appendChild(startingCell);
+
+        const secondCell = document.createElement("td");
+        secondCell.appendChild(createTransitionGroup(batterIdx, "second"));
+        tr.appendChild(secondCell);
+
+        const thirdCell = document.createElement("td");
+        thirdCell.appendChild(createTransitionGroup(batterIdx, "third"));
+        tr.appendChild(thirdCell);
+
+        tbody.appendChild(tr);
+      });
+
+      container.appendChild(template);
+      container.classList.remove("hidden");
+    }
+
+    function createPositionSelect(defaultValue, batterIdx, slot, options = POSITION_OPTIONS) {
+      const select = document.createElement("select");
+      select.setAttribute("data-batter-idx", batterIdx);
+      select.setAttribute("data-role", slot);
+      options.forEach(({ value, label }) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        if (value && value === defaultValue) {
+          option.selected = true;
+        }
+        select.appendChild(option);
+      });
+      return select;
+    }
+
+    function createTransitionGroup(batterIdx, slot) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "multi-select";
+
+      const inningSelect = document.createElement("select");
+      inningSelect.setAttribute("data-batter-idx", batterIdx);
+      inningSelect.setAttribute("data-role", `${slot}-inning`);
+      INNING_OPTIONS.forEach(({ value, label }) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        inningSelect.appendChild(option);
+      });
+
+      const outSelect = document.createElement("select");
+      outSelect.setAttribute("data-batter-idx", batterIdx);
+      outSelect.setAttribute("data-role", `${slot}-outs`);
+      OUT_OPTIONS.forEach(({ value, label }) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        outSelect.appendChild(option);
+      });
+
+      const positionSelect = createPositionSelect(
+        "",
+        batterIdx,
+        `${slot}-position`,
+        POSITION_OPTIONS
+      );
+
+      wrapper.appendChild(inningSelect);
+      wrapper.appendChild(outSelect);
+      wrapper.appendChild(positionSelect);
+
+      return wrapper;
+    }
+
+    function showAppearancePage() {
+      if (!currentLineups) return;
+
+      document.getElementById("away").classList.add("hidden");
+      document.getElementById("home").classList.add("hidden");
+      document.getElementById("nav").classList.add("hidden");
+      renderAppearanceTables("appearance-away", "어웨이 (선공)", currentLineups.away);
+      renderAppearanceTables("appearance-home", "홈 (후공)", currentLineups.home);
+      document.getElementById("appearance-page").classList.remove("hidden");
+    }
+
+    function renderAppearanceTables(containerId, title, lineupMap) {
+      const container = document.getElementById(containerId);
+      container.innerHTML = "";
+
+      if (!lineupMap || !lineupMap.size) {
+        const empty = document.createElement("p");
+        empty.textContent = "라인업 정보를 먼저 불러와 주세요.";
+        container.appendChild(empty);
+        return;
+      }
+
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+
+      const orderTh = document.createElement("th");
+      orderTh.textContent = "타순";
+      headRow.appendChild(orderTh);
+
+      const nameTh = document.createElement("th");
+      nameTh.textContent = "선수";
+      headRow.appendChild(nameTh);
+
+      for (let inning = 1; inning <= MAX_INNING; inning += 1) {
+        const inningTh = document.createElement("th");
+        inningTh.textContent = `${inning}이닝`;
+        headRow.appendChild(inningTh);
+      }
+
+      const plateAppearanceTh = document.createElement("th");
+      plateAppearanceTh.textContent = "타석";
+      headRow.appendChild(plateAppearanceTh);
+
+      const atBatTh = document.createElement("th");
+      atBatTh.textContent = "타수";
+      headRow.appendChild(atBatTh);
+
+      const hitTh = document.createElement("th");
+      hitTh.textContent = "안타";
+      headRow.appendChild(hitTh);
+
+      const averageTh = document.createElement("th");
+      averageTh.textContent = "타율";
+      headRow.appendChild(averageTh);
+
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      const sorted = Array.from(lineupMap.entries()).sort((a, b) => a[0] - b[0]);
+
+      sorted.forEach(([_, info], order) => {
+        const row = document.createElement("tr");
+
+        const orderCell = document.createElement("td");
+        orderCell.textContent = `${order + 1}`;
+        row.appendChild(orderCell);
+
+        const nameCell = document.createElement("td");
+        nameCell.textContent = info.name;
+        row.appendChild(nameCell);
+
+        for (let inning = 1; inning <= MAX_INNING; inning += 1) {
+          const cell = document.createElement("td");
+          const inningData = info.appearances?.get?.(inning);
+
+          if (inningData?.text) {
+            cell.textContent = inningData.text;
+          } else if (info.appearances?.has?.(inning)) {
+            cell.textContent = "타석";
+          } else {
+            cell.textContent = "";
+          }
+          row.appendChild(cell);
+        }
+
+        const { plateAppearances, atBats, hits, battingAverage } = computeBatterStats(info);
+
+        const paCell = document.createElement("td");
+        paCell.textContent = String(plateAppearances);
+        row.appendChild(paCell);
+
+        const atBatCell = document.createElement("td");
+        atBatCell.textContent = String(atBats);
+        row.appendChild(atBatCell);
+
+        const hitCell = document.createElement("td");
+        hitCell.textContent = String(hits);
+        row.appendChild(hitCell);
+
+        const avgCell = document.createElement("td");
+        avgCell.textContent = atBats ? battingAverage : "0.000";
+        row.appendChild(avgCell);
+
+        tbody.appendChild(row);
+      });
+
+      table.appendChild(tbody);
+
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+
+      container.appendChild(heading);
+      container.appendChild(table);
+    }
+  </script>
+</body>
+</html>
